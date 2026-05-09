@@ -72,7 +72,7 @@ def get_stats(df):
             "total_attacks": 0, "unique_ips": 0, "top_attacked_port": "N/A",
             "top_attack_type": "N/A", "attack_type_counts": {},
             "top_ips": [], "service_counts": {}, "recent_attacks": [],
-            "last_24h": 0, "defense_strategies": [], "port_scan_ips": [],
+            "last_24h": 0, "defense_strategies": {}, "port_scan_ips": [],
             "brute_force_ips": [], "top_countries": []
         }
 
@@ -96,7 +96,8 @@ def get_stats(df):
 
     # Recent attacks (last 20)
     recent = df.sort_values("timestamp", ascending=False).head(20)
-    recent_attacks = recent[["timestamp","attacker_ip","service","attack_type", "country", "city"]].to_dict("records")
+    recent["payload"] = recent["payload"].fillna("").astype(str)
+    recent_attacks = recent[["timestamp","attacker_ip","service","attack_type","country","city","payload"]].to_dict("records")
     for r in recent_attacks:
         r["timestamp"] = str(r["timestamp"])
 

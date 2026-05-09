@@ -2,7 +2,7 @@
 
 ### 1. Install Dependencies
 ```
-pip install flask pandas matplotlib
+pip install requirements.txt
 ```
 
 ### 2. Structure:
@@ -11,6 +11,8 @@ HoneyTrapX
     ├── honeypot.py        ← Core listener (captures attacks)
     ├── analyzer.py        ← Analyzes attack patterns
     ├── app.py             ← Flask web dashboard
+    ├── test_fake_shell.py ← Attack log Generator
+    ├── requirements.txt
     ├── templates/
     │   └── index.html     ← Beautiful dashboard UI
     ├── logs/
@@ -30,20 +32,7 @@ python app.py
 
 #### iii.Generate Attack Log (New Terminal)
 ```
-python -c "
-import socket, time
-ports = [21, 22, 23, 80, 8080, 3306]
-for p in ports:
-    try:
-        s = socket.socket()
-        s.settimeout(2)
-        s.connect(('127.0.0.1', p))
-        s.send(b'admin\r\n')
-        s.close()
-        print(f'Hit port {p}')
-        time.sleep(0.5)
-    except: pass
-print('Done!') "
+python test_fake_shell.py
 ```
 
 #### iv. For Showing Charts 

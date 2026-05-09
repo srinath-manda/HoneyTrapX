@@ -1,3 +1,4 @@
+import threading
 from flask import Flask, render_template, jsonify, send_from_directory, request
 from flask_socketio import SocketIO, emit
 from analyzer import load_data, get_stats, generate_charts
@@ -12,6 +13,11 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'honeypot-default-secret
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 LOG_FILE = "logs/attacks.csv"
+
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory('static', 'favicon.ico', mimetype='image/x-icon')
 
 @app.route('/reports/<path:filename>')
 def reports(filename):
@@ -70,9 +76,10 @@ def add_demo_data():
 @app.route("/")
 def index():
     add_demo_data()
-    df = load_data()
-    generate_charts(df)
+    df    = load_data()
     stats = get_stats(df)
+    # Charts generated in background — don't block page load
+    threading.Thread(target=generate_charts, args=(df,), daemon=True).start()
     return render_template("index.html", stats=stats)
 
 @app.route("/api/report_attack", methods=["POST"])
