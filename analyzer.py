@@ -10,6 +10,15 @@ REPORTS_DIR = "reports"
 
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
+MITRE_MAP = {
+    "SSH Brute Force / Scan": "T1110.001 (Brute Force: Password Guessing)",
+    "FTP Probe": "T1595.001 (Active Scanning: Scanning IP Blocks)",
+    "Telnet Exploit Attempt": "T1021.001 (Remote Services: SSH/Telnet)",
+    "Web Scan / HTTP Probe": "T1595.002 (Active Scanning: Vulnerability Scanning)",
+    "Database Attack": "T1190 (Exploit Public-Facing Application)",
+    "Generic Probe": "T1595 (Active Scanning)",
+}
+
 DEFENSE_MAP = {
     "SSH Brute Force / Scan": [
         "Disable password auth — use SSH key pairs only",
@@ -55,7 +64,7 @@ def load_data():
     if not os.path.exists(LOG_FILE):
         return pd.DataFrame(columns=["timestamp","attacker_ip","attacker_port",
                                       "target_port","service","attack_type",
-                                      "payload","duration_ms","country","city"])
+                                      "payload","duration_ms","country","city","session_id"])
     try:
         df = pd.read_csv(LOG_FILE)
         if df.empty:
@@ -73,10 +82,23 @@ def get_stats(df):
             "top_attack_type": "N/A", "attack_type_counts": {},
             "top_ips": [], "service_counts": {}, "recent_attacks": [],
             "last_24h": 0, "defense_strategies": {}, "port_scan_ips": [],
-            "brute_force_ips": [], "top_countries": []
+            "brute_force_ips": [], "top_countries": [], "mitre_counts": {}
         }
 
+    # Map attack types to MITRE techniques
+    df["mitre_technique"] = df["attack_type"].map(MITRE_MAP).fillna("T1595 (Active Scanning)")
+
+    # Handle Canary Hits
+    canary_hits = df[df["payload"].str.contains("CANARY_HIT:", na=False)]
+    for idx, row in canary_hits.iterrows():
+        try:
+            technique = row["payload"].split("CANARY_HIT:")[1].split(" | ")[0]
+            df.at[idx, "mitre_technique"] = technique
+        except:
+            pass
+
     attack_type_counts = df["attack_type"].value_counts().to_dict()
+    mitre_counts = df["mitre_technique"].value_counts().to_dict()
     service_counts = df["service"].value_counts().to_dict()
 
     top_ips = df["attacker_ip"].value_counts().head(10).reset_index()
@@ -97,7 +119,11 @@ def get_stats(df):
     # Recent attacks (last 20)
     recent = df.sort_values("timestamp", ascending=False).head(20)
     recent["payload"] = recent["payload"].fillna("").astype(str)
-    recent_attacks = recent[["timestamp","attacker_ip","service","attack_type","country","city","payload"]].to_dict("records")
+    # Ensure session_id is included
+    cols = ["timestamp","attacker_ip","service","attack_type","country","city","payload"]
+    if "session_id" in df.columns:
+        cols.append("session_id")
+    recent_attacks = recent[cols].to_dict("records")
     for r in recent_attacks:
         r["timestamp"] = str(r["timestamp"])
 
@@ -118,6 +144,7 @@ def get_stats(df):
         "top_attacked_port": str(df["target_port"].mode()[0]) if not df.empty else "N/A",
         "top_attack_type": df["attack_type"].mode()[0] if not df.empty else "N/A",
         "attack_type_counts": attack_type_counts,
+        "mitre_counts": mitre_counts,
         "service_counts": service_counts,
         "top_ips": top_ips.to_dict("records"),
         "top_countries": top_countries.to_dict("records"),
@@ -131,18 +158,29 @@ def get_stats(df):
 def generate_charts(df):
     if df.empty:
         return
+
+    # Map MITRE techniques for chart generation
+    df["mitre_technique"] = df["attack_type"].map(MITRE_MAP).fillna("T1595 (Active Scanning)")
+    canary_hits = df[df["payload"].str.contains("CANARY_HIT:", na=False)]
+    for idx, row in canary_hits.iterrows():
+        try:
+            technique = row["payload"].split("CANARY_HIT:")[1].split(" | ")[0]
+            df.at[idx, "mitre_technique"] = technique
+        except:
+            pass
+
     plt.style.use("dark_background")
 
-    # Chart 1: Attack Types Pie
+    # Chart 1: MITRE Techniques Pie
     fig, ax = plt.subplots(figsize=(6, 5), facecolor="#0d1117")
-    counts = df["attack_type"].value_counts()
+    counts = df["mitre_technique"].value_counts()
     colors = ["#00ff88", "#ff4444", "#ffaa00", "#00aaff", "#cc44ff", "#ff6600"]
     ax.pie(
         counts.values, labels=counts.index, autopct="%1.1f%%",
         colors=colors[:len(counts)], startangle=140,
         textprops={"color": "white", "fontsize": 9},
     )
-    ax.set_title("Attack Type Distribution", color="#00ff88", fontsize=13, pad=15)
+    ax.set_title("MITRE ATT&CK Techniques", color="#00ff88", fontsize=13, pad=15)
     fig.tight_layout()
     fig.savefig(f"{REPORTS_DIR}/attack_types.png", dpi=100, bbox_inches="tight", facecolor="#0d1117")
     plt.close()
