@@ -47,7 +47,6 @@ def add_demo_data():
         (2323, "Telnet", "Telnet Exploit Attempt"),
         (8080, "HTTP", "Web Scan / HTTP Probe"),
         (33060, "MySQL", "Database Attack"),
-        (8081, "HTTP-ALT", "Web App Attack"),
     ]
     payloads = [
         "USER admin | PASS 123456", "GET /admin HTTP/1.1", "nmap scan detected",
@@ -58,7 +57,7 @@ def add_demo_data():
     with open(LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp","attacker_ip","attacker_port","target_port",
-                         "service","attack_type","payload","duration_ms","country","city"])
+                         "service","attack_type","payload","duration_ms","country","city","session_id"])
         base = datetime.now()
         for i in range(40):
             ts = base - timedelta(minutes=random.randint(0, 1440))
@@ -69,7 +68,7 @@ def add_demo_data():
                 ip, random.randint(40000, 65000), port,
                 svc, atype, random.choice(payloads),
                 round(random.uniform(10, 500), 2),
-                country, city
+                country, city, ""
             ])
     print("[*] Demo data loaded for new schema.")
 
@@ -81,6 +80,18 @@ def index():
     # Charts generated in background — don't block page load
     threading.Thread(target=generate_charts, args=(df,), daemon=True).start()
     return render_template("index.html", stats=stats)
+
+@app.route("/api/session/<session_id>")
+def get_session_transcript(session_id):
+    # Security: basic check to prevent path traversal
+    if ".." in session_id or "/" in session_id:
+        return jsonify({"error": "invalid session id"}), 400
+
+    path = f"logs/sessions/{session_id}.json"
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return jsonify(json.load(f))
+    return jsonify({"error": "session not found"}), 404
 
 @app.route("/api/report_attack", methods=["POST"])
 def report_attack():

@@ -4,35 +4,37 @@ import csv
 import json
 import os
 import time
+import uuid
 import requests
 from datetime import datetime
+from canary import check_canary
 
 LOG_FILE_CSV  = "logs/attacks.csv"
 LOG_FILE_JSON = "logs/attacks.json"
 DASHBOARD_URL = "http://127.0.0.1:5000/api/report_attack"
 
 PORT_NAMES = {
-    21:   "FTP",
-    22:   "SSH",
-    23:   "Telnet",
-    80:   "HTTP",
-    3306: "MySQL",
+    2121:  "FTP",
+    2222:  "SSH",
+    2323:  "Telnet",
+    8080:  "HTTP",
+    33060: "MySQL",
 }
 
 ATTACK_TYPES = {
-    21:   "FTP Probe",
-    22:   "SSH Brute Force / Scan",
-    23:   "Telnet Exploit Attempt",
-    80:   "Web Scan / HTTP Probe",
-    3306: "Database Attack",
+    2121:  "FTP Probe",
+    2222:  "SSH Brute Force / Scan",
+    2323:  "Telnet Exploit Attempt",
+    8080:  "Web Scan / HTTP Probe",
+    33060: "Database Attack",
 }
 
 BANNERS = {
-    21:   b"220 ProFTPD 1.3.5 Server ready.\r\n",
-    22:   b"SSH-2.0-OpenSSH_7.4\r\n",
-    23:   b"\r\nCisco IOS Router v12.4\r\nUsername: ",
-    80:   None,   # handled separately
-    3306: b"\x4a\x00\x00\x00\x0a" b"5.7.33-MySQL\x00\x08\x00\x00\x00fakesalt\x00\xff\xf7\x08\x02\x00\xff\x81\x15\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00fakesalt2\x00",
+    2121:  b"220 ProFTPD 1.3.5 Server ready.\r\n",
+    2222:  b"SSH-2.0-OpenSSH_7.4\r\n",
+    2323:  b"\r\nCisco IOS Router v12.4\r\nUsername: ",
+    8080:  None,   # handled separately
+    33060: b"\x4a\x00\x00\x00\x0a" b"5.7.33-MySQL\x00\x08\x00\x00\x00fakesalt\x00\xff\xf7\x08\x02\x00\xff\x81\x15\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00fakesalt2\x00",
 }
 
 # ── Fake filesystem state (per-session, lives in memory) ─────────
@@ -108,7 +110,7 @@ if not os.path.exists(LOG_FILE_CSV):
     with open(LOG_FILE_CSV, "w", newline="") as f:
         csv.writer(f).writerow([
             "timestamp","attacker_ip","attacker_port","target_port",
-            "service","attack_type","payload","duration_ms","country","city"
+            "service","attack_type","payload","duration_ms","country","city","session_id"
         ])
 
 log_lock = threading.Lock()
@@ -119,7 +121,7 @@ def notify_dashboard(data):
     except Exception:
         pass
 
-def log_attack(ip, attacker_port, target_port, payload, duration_ms):
+def log_attack(ip, attacker_port, target_port, payload, duration_ms, session_id=None):
     country, city = get_geo(ip)
     row = {
         "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -132,6 +134,7 @@ def log_attack(ip, attacker_port, target_port, payload, duration_ms):
         "duration_ms": round(duration_ms, 2),
         "country":     country,
         "city":        city,
+        "session_id":  session_id
     }
     with log_lock:
         with open(LOG_FILE_CSV, "a", newline="") as f:
@@ -142,8 +145,14 @@ def log_attack(ip, attacker_port, target_port, payload, duration_ms):
     print(f"{color}[{row['timestamp']}]\033[0m {row['service']} ← {ip} ({country}/{city}) | {str(payload)[:60]!r}")
     threading.Thread(target=notify_dashboard, args=(row,), daemon=True).start()
 
+# ── Session Logging ─────────────────────────────────────────────
+def save_session_transcript(session_id, transcript):
+    os.makedirs("logs/sessions", exist_ok=True)
+    with open(f"logs/sessions/{session_id}.json", "w") as f:
+        json.dump(transcript, f, indent=2)
+
 # ── Fake shell ──────────────────────────────────────────────────
-def run_fake_shell(conn, payload_parts):
+def run_fake_shell(conn, payload_parts, session_id, transcript):
     """Interactive fake Linux shell. Supports ls, pwd, whoami, echo,
        touch, cat, rm, mkdir, uname, id, ps, env, history, clear, help."""
 
@@ -155,10 +164,12 @@ def run_fake_shell(conn, payload_parts):
     def fs_list(path):
         return session_fs.get(path, [])
 
-    def send(msg):
+    def send(msg, log_msg=True):
+        if log_msg:
+            transcript.append({"source": "server", "data": msg if isinstance(msg, str) else msg.decode(errors="ignore")})
         conn.sendall(msg if isinstance(msg, bytes) else msg.encode())
 
-    conn.sendall(b"\r\nWelcome to the restricted shell. Type 'help' for commands.\r\n$ ")
+    send(b"\r\nWelcome to the restricted shell. Type 'help' for commands.\r\n$ ", log_msg=False)
 
     while True:
         try:
@@ -169,6 +180,7 @@ def run_fake_shell(conn, payload_parts):
             break
 
         cmd = cmd_data.decode(errors="ignore").strip()
+        transcript.append({"source": "attacker", "data": cmd})
         if not cmd:
             send(b"$ ")
             continue
@@ -256,6 +268,11 @@ def run_fake_shell(conn, payload_parts):
                 send(b"cat: missing operand\r\n$ ")
             else:
                 fname = parts[1]
+                full_path = fname if fname.startswith("/") else f"{cwd}/{fname}"
+                canary_hit = check_canary(full_path)
+                if canary_hit:
+                     payload_parts.append(f"CANARY_HIT:{canary_hit}")
+
                 # try bare name first, then full path
                 content = session_files.get(fname) or session_files.get(cwd+"/"+fname)
                 if content is not None:
@@ -320,12 +337,13 @@ def run_fake_shell(conn, payload_parts):
             send(f"bash: {cmd}: command not found\r\n$ ")
 
 # ── Port 80 handler ─────────────────────────────────────────────
-def handle_http(conn, payload_parts):
+def handle_http(conn, payload_parts, transcript):
     conn.settimeout(5)
     try:
         data = conn.recv(4096).decode(errors="ignore")
         if not data:
             return
+        transcript.append({"source": "attacker", "data": data})
         lines = data.split("\r\n")
         method_line = lines[0] if lines else ""
         payload_parts.append(method_line[:100])
@@ -335,15 +353,18 @@ def handle_http(conn, payload_parts):
             body = data.split("\r\n\r\n", 1)[-1]
             payload_parts.append(f"CREDS:{body[:80]}")
             conn.sendall(HTTP_401)
+            transcript.append({"source": "server", "data": HTTP_401.decode(errors="ignore")})
         else:
             conn.sendall(HTTP_LOGIN_PAGE)
+            transcript.append({"source": "server", "data": "[HTML Login Page sent]"})
     except socket.timeout:
         pass
 
 # ── FTP handler ─────────────────────────────────────────────────
-def handle_ftp(conn, payload_parts):
+def handle_ftp(conn, payload_parts, transcript):
     conn.settimeout(8)
     conn.sendall(b"220 ProFTPD 1.3.5 Server ready.\r\n")
+    transcript.append({"source": "server", "data": "220 ProFTPD 1.3.5 Server ready.\r\n"})
     try:
         while True:
             data = conn.recv(1024)
@@ -352,27 +373,39 @@ def handle_ftp(conn, payload_parts):
             cmd = data.decode(errors="ignore").strip()
             if not cmd:
                 continue
+            transcript.append({"source": "attacker", "data": cmd})
             payload_parts.append(cmd[:60])
             cl = cmd.upper()
             if cl.startswith("USER"):
                 conn.sendall(b"331 Password required.\r\n")
+                transcript.append({"source": "server", "data": "331 Password required.\r\n"})
             elif cl.startswith("PASS"):
                 conn.sendall(b"230 Login successful.\r\n")
+                transcript.append({"source": "server", "data": "230 Login successful.\r\n"})
             elif cl.startswith("LIST") or cl.startswith("NLST"):
-                conn.sendall(
+                resp = (
                     b"150 Opening ASCII mode data connection.\r\n"
                     b"-rw-r--r-- 1 root root  1024 Jan 01 config.bak\r\n"
                     b"-rw-r--r-- 1 root root  2048 Jan 01 passwords.txt\r\n"
                     b"-rw-r--r-- 1 root root   512 Jan 01 .ssh_keys\r\n"
                     b"226 Transfer complete.\r\n"
                 )
+                conn.sendall(resp)
+                transcript.append({"source": "server", "data": resp.decode(errors="ignore")})
             elif cl.startswith("RETR"):
                 conn.sendall(b"550 Permission denied.\r\n")
+                transcript.append({"source": "server", "data": "550 Permission denied.\r\n"})
+                full_path = cmd[4:].strip()
+                canary_hit = check_canary(full_path)
+                if canary_hit:
+                    payload_parts.append(f"CANARY_HIT:{canary_hit}")
             elif cl.startswith("QUIT"):
                 conn.sendall(b"221 Goodbye.\r\n")
+                transcript.append({"source": "server", "data": "221 Goodbye.\r\n"})
                 break
             else:
                 conn.sendall(b"200 OK\r\n")
+                transcript.append({"source": "server", "data": "200 OK\r\n"})
     except socket.timeout:
         pass
 
@@ -381,51 +414,63 @@ def handle_connection(conn, addr, port):
     start        = time.time()
     attacker_ip, attacker_port = addr
     payload_parts = []
+    session_id = str(uuid.uuid4())
+    transcript = []
 
     try:
         conn.settimeout(15)
 
-        if port == 80:
-            handle_http(conn, payload_parts)
+        if port == 8080:
+            handle_http(conn, payload_parts, transcript)
 
-        elif port == 21:
-            handle_ftp(conn, payload_parts)
+        elif port == 2121:
+            handle_ftp(conn, payload_parts, transcript)
 
-        elif port in (22, 23):
+        elif port in (2222, 2323):
             # Send banner
             conn.sendall(BANNERS[port])
+            transcript.append({"source": "server", "data": BANNERS[port].decode(errors="ignore")})
             # Read initial probe byte (nmap etc.)
             try:
-                conn.recv(64)
+                probe = conn.recv(64)
+                if probe:
+                     transcript.append({"source": "attacker", "data": f"[Probe: {probe.hex()}]"})
             except socket.timeout:
                 pass
 
             conn.sendall(b"Username: ")
+            transcript.append({"source": "server", "data": "Username: "})
             try:
                 user_data = conn.recv(1024)
             except socket.timeout:
                 user_data = b""
             u = user_data.decode(errors="ignore").strip()
+            transcript.append({"source": "attacker", "data": u})
 
             conn.sendall(b"Password: ")
+            transcript.append({"source": "server", "data": "Password: "})
             try:
                 pw_data = conn.recv(1024)
             except socket.timeout:
                 pw_data = b""
             p = pw_data.decode(errors="ignore").strip()
+            transcript.append({"source": "attacker", "data": "*" * len(p)})
 
             if u == "admin" and p == "admin":
-                run_fake_shell(conn, payload_parts)
+                run_fake_shell(conn, payload_parts, session_id, transcript)
             else:
-                payload_parts.append("[Auth failed]")
+                payload_parts.append(f"[Auth failed: {u}/{p}]")
                 conn.sendall(b"\r\nAuthentication failed.\r\n")
+                transcript.append({"source": "server", "data": "\r\nAuthentication failed.\r\n"})
 
-        elif port == 3306:
-            conn.sendall(BANNERS[3306])
+        elif port == 33060:
+            conn.sendall(BANNERS[33060])
+            transcript.append({"source": "server", "data": f"[MySQL Handshake: {BANNERS[33060].hex()}]"})
             try:
                 data = conn.recv(1024)
                 if data:
                     payload_parts.append(f"DB_HANDSHAKE:{data[:40].hex()}")
+                    transcript.append({"source": "attacker", "data": f"[Client response: {data.hex()}]"})
             except socket.timeout:
                 pass
 
@@ -441,10 +486,13 @@ def handle_connection(conn, addr, port):
         pass   # clean — no [Error] logged
     except Exception as e:
         payload_parts.append(f"[ERR:{e}]")
+        transcript.append({"source": "server", "data": f"[Internal Error: {e}]"})
     finally:
         duration_ms = (time.time() - start) * 1000
         payload     = " | ".join(payload_parts) if payload_parts else "(connection probe)"
-        log_attack(attacker_ip, attacker_port, port, payload, duration_ms)
+        log_attack(attacker_ip, attacker_port, port, payload, duration_ms, session_id)
+        if transcript:
+            save_session_transcript(session_id, transcript)
         try:
             conn.close()
         except Exception:
@@ -474,11 +522,7 @@ def run():
     print("╚══════════════════════════════════════════════════════╝\033[0m")
     print("  Active listeners:")
     ports = list(PORT_NAMES.keys())
-    enable_mysql = os.environ.get("ENABLE_MYSQL_LISTENER", "0") == "1"
     for p in ports:
-        if p == 3306 and not enable_mysql:
-            print(f"  \033[90m[-] Port  3306  (MySQL) — skipped (set ENABLE_MYSQL_LISTENER=1 to enable)\033[0m")
-            continue
         threading.Thread(target=start_listener, args=(p,), daemon=True).start()
         time.sleep(0.05)
 

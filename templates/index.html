@@ -106,6 +106,26 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px; }
   .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 28px; }
 
+  /* Modal */
+  .modal {
+    display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.8); backdrop-filter: blur(4px);
+  }
+  .modal-content {
+    background: var(--panel); margin: 5% auto; padding: 20px; border: 1px solid var(--green);
+    width: 80%; max-width: 900px; border-radius: 10px; position: relative;
+  }
+  .close {
+    position: absolute; right: 20px; top: 10px; color: var(--muted); font-size: 28px; font-weight: bold; cursor: pointer;
+  }
+  .close:hover { color: var(--green); }
+  .transcript-box {
+    height: 500px; overflow-y: auto; background: #05080b; padding: 20px; border-radius: 6px;
+    font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  }
+  .line-attacker { color: var(--green); margin-bottom: 4px; }
+  .line-server { color: var(--blue); margin-bottom: 4px; }
+
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -214,6 +234,14 @@
     </div>
   </div>
 
+  <div id="sessionModal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="closeModal()">&times;</span>
+      <h3 style="font-family:var(--mono); color:var(--green); margin-bottom:15px">SESSION TRANSCRIPT</h3>
+      <div id="transcript" class="transcript-box"></div>
+    </div>
+  </div>
+
   <div class="panel" style="margin-bottom:28px">
     <div class="panel-header">
       <span class="panel-title">📡 Live Attack Stream</span>
@@ -231,7 +259,7 @@
 
   <div class="grid3">
     <div class="panel">
-      <div class="panel-header"><span class="panel-title">📊 Attack Vectors</span></div>
+      <div class="panel-header"><span class="panel-title">🛡 MITRE ATT&CK Mapping</span></div>
       <div class="panel-body"><img id="chart-types" src="/reports/attack_types.png" class="chart-img"/></div>
     </div>
     <div class="panel">
@@ -250,15 +278,21 @@
       <div class="panel-body" style="padding:0">
         <table class="threat-table" id="intel-table">
           <thead>
-            <tr><th>Time</th><th>Attacker</th><th>Location</th><th>Service</th></tr>
+            <tr><th>Time</th><th>Attacker</th><th>Service</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {% for a in stats.recent_attacks[:10] %}
             <tr>
               <td style="color:var(--muted)">{{ a.timestamp[11:19] }}</td>
               <td style="color:var(--green)">{{ a.attacker_ip }}</td>
-              <td><span class="badge badge-geo">{{ a.country }}</span></td>
               <td style="color:var(--yellow)">{{ a.service }}</td>
+              <td>
+                {% if a.session_id %}
+                <button onclick="viewSession('{{ a.session_id }}')" style="background:none; border:1px solid var(--blue); color:var(--blue); font-family:var(--mono); font-size:10px; cursor:pointer; padding:2px 5px; border-radius:3px">VIEW TRANSCRIPT</button>
+                {% else %}
+                -
+                {% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>
@@ -337,14 +371,49 @@
     // 3. Update Table
     const table = document.getElementById('intel-table').getElementsByTagName('tbody')[0];
     const row = table.insertRow(0);
+    const sessionBtn = data.session_id ? `<button onclick="viewSession('${data.session_id}')" style="background:none; border:1px solid var(--blue); color:var(--blue); font-family:var(--mono); font-size:10px; cursor:pointer; padding:2px 5px; border-radius:3px">VIEW TRANSCRIPT</button>` : '-';
     row.innerHTML = `
       <td style="color:var(--muted)">${ts}</td>
       <td style="color:var(--green)">${ip}</td>
-      <td><span class="badge badge-geo">${country}</span></td>
       <td style="color:var(--yellow)">${service}</td>
+      <td>${sessionBtn}</td>
     `;
     if (table.rows.length > 10) table.deleteRow(10);
   });
+
+  function viewSession(sid) {
+    const modal = document.getElementById('sessionModal');
+    const box = document.getElementById('transcript');
+    box.innerHTML = 'Loading...';
+    modal.style.display = 'block';
+
+    fetch(`/api/session/${sid}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          box.innerHTML = `<span style="color:var(--red)">${data.error}</span>`;
+          return;
+        }
+        box.innerHTML = '';
+        data.forEach(line => {
+          const div = document.createElement('div');
+          div.className = line.source === 'attacker' ? 'line-attacker' : 'line-server';
+          div.innerHTML = `<span style="opacity:0.5">${line.source.toUpperCase()}:</span> ${escapeHTML(line.data)}`;
+          box.appendChild(div);
+        });
+      });
+  }
+
+  function closeModal() {
+    document.getElementById('sessionModal').style.display = 'none';
+  }
+
+  window.onclick = function(event) {
+    const modal = document.getElementById('sessionModal');
+    if (event.target == modal) {
+      modal.style.display = "none";
+    }
+  }
 
   // Periodically refresh charts
   setInterval(() => {
